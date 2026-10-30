@@ -238,7 +238,7 @@ function upcomingStops(group: Arrival[]): UpcomingStop[] {
       timeToStation: item.timeToStation,
       expectedArrival: item.expectedArrival,
     });
-    if (stops.length === 6) break;
+
   }
   return stops;
 }

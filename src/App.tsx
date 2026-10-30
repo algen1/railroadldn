@@ -4,47 +4,97 @@ import { formatClock, formatUpdated, formatWait, normalizeStation, shortStation 
 import MainMenu, { type StationHit } from "./MainMenu";
 import MapView, { type MapFocus } from "./MapView";
 import { useNetwork } from "./useNetwork";
-import type { LineRoute, Train } from "./types";
+import type { Journey } from "./journey";
+import type { Train, UpcomingStop } from "./types";
 
 export default function App() {
   const { routes, trains, status, message, updatedAt, reload } = useNetwork();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  const [catching, setCatching] = useState<{ trainId: string; lineId: string; stop: UpcomingStop } | null>(null);
+  const [selectedStation, setSelectedStation] = useState<StationHit | null>(null);
+  const [journey, setJourney] = useState<Journey | null>(null);
   const [menuOpen, setMenuOpen] = useState(true);
   const [focus, setFocus] = useState<MapFocus | null>(null);
 
   const visible = useMemo(() => {
+    if (catching) return new Set([catching.lineId]);
     const ids = new Set<string>();
     for (const line of LINES) {
       if (!hidden.has(line.id)) ids.add(line.id);
     }
     return ids;
-  }, [hidden]);
+  }, [hidden, catching]);
 
-  const needle = normalizeStation(query);
-  const lineTrains = useMemo(
-    () => trains.filter((train) => visible.has(train.lineId)),
-    [trains, visible],
-  );
-  const matchedTrains = useMemo(
-    () => lineTrains.filter((train) => trainMatches(train, needle)),
-    [lineTrains, needle],
-  );
-  const selected = lineTrains.find((train) => train.id === selectedId) ?? null;
-  const stations = useMemo(() => stationHits(routes, visible, needle), [routes, visible, needle]);
+  const lineTrains = useMemo(() => trains.filter((train) => visible.has(train.lineId)), [trains, visible]);
+  const mapTrains = useMemo(() => catching ? trains.filter((train) => train.id === catching.trainId) : lineTrains, [catching, trains, lineTrains]);
+  const selected = mapTrains.find((train) => train.id === (catching?.trainId ?? selectedId)) ?? null;
+  const catchTrain = catching ? trains.find((train) => train.id === catching.trainId) : null;
+  const catchLeg = catching ? journey?.legs.find((leg) => leg.departurePoint.naptanId === catching.stop.naptanId && leg.routeOptions?.some((option) => option.lineIdentifier?.id === catching.lineId)) : null;
+  const boarding = catching ? catchTrain?.stops.find((stop) => stop.naptanId === catching.stop.naptanId) : null;
+
+  function showAllTrains() {
+    setCatching(null);
+    setSelectedId(null);
+  }
+
+  function openJourneyTrain(train: Train, stop: UpcomingStop) {
+    selectTrain(train.id);
+    setCatching({ trainId: train.id, lineId: train.lineId, stop });
+    setFocus({ lng: train.lng, lat: train.lat, zoom: 14.2, token: Date.now() });
+  }
+
+  function chooseJourney(value: Journey | null) {
+    showAllTrains();
+    setJourney(value);
+  }
+
+  const stationInfo = useMemo(() => {
+    if (!selectedStation) return null;
+    const ids = new Set([selectedStation.id]);
+    const name = normalizeStation(selectedStation.name);
+    const lines = routes.filter((route) => route.branches.some((branch) =>
+      branch.stops.some((stop) => {
+        const matches = stop.id === selectedStation.id || normalizeStation(shortStation(stop.name)) === name;
+        if (matches) ids.add(stop.id);
+        return matches;
+      }),
+    ));
+    // Collect every platform ID, including branches on the same line.
+    for (const route of lines) for (const branch of route.branches) for (const stop of branch.stops) {
+      if (normalizeStation(shortStation(stop.name)) === name) ids.add(stop.id);
+    }
+    const arrivals = trains.flatMap((train) => train.stops
+      .filter((stop) => ids.has(stop.naptanId) && Date.parse(stop.expectedArrival) >= now)
+      .map((stop) => ({ train, stop })))
+      .sort((a, b) => Date.parse(a.stop.expectedArrival) - Date.parse(b.stop.expectedArrival))
+      .slice(0, 12);
+    return { lines, arrivals };
+  }, [selectedStation, routes, trains, now]);
+
+  function selectTrain(id: string | null) {
+    setSelectedStation(null);
+    setSelectedId(id);
+    if (!id) setCatching(null);
+    setMenuOpen(false);
+  }
 
   useEffect(() => {
-    if (selectedId && !lineTrains.some((train) => train.id === selectedId)) {
+    if (selectedId && !mapTrains.some((train) => train.id === selectedId)) {
       setSelectedId(null);
     }
-  }, [selectedId, lineTrains]);
+  }, [selectedId, mapTrains]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         if (menuOpen) setMenuOpen(false);
-        else setSelectedId(null);
+        else { showAllTrains(); setSelectedStation(null); }
       }
     };
     window.addEventListener("keydown", onKey);
@@ -74,12 +124,17 @@ export default function App() {
   }
 
   function openTrain(train: Train) {
-    setSelectedId(train.id);
+    setCatching(null);
+    setHidden((current) => { const next = new Set(current); next.delete(train.lineId); return next; });
+    selectTrain(train.id);
     setFocus({ lng: train.lng, lat: train.lat, zoom: 14.2, token: Date.now() });
     setMenuOpen(false);
   }
 
   function openStation(station: StationHit) {
+    setCatching(null);
+    setSelectedId(null);
+    setSelectedStation(station);
     setFocus({ lng: station.lng, lat: station.lat, zoom: 14, token: Date.now() });
     setMenuOpen(false);
   }
@@ -88,11 +143,13 @@ export default function App() {
     <main className="shell">
       <MapView
         routes={routes}
-        trains={lineTrains}
+        trains={mapTrains}
         visible={visible}
         selectedId={selected?.id ?? null}
         focus={focus}
-        onSelect={setSelectedId}
+        journey={catching ? null : journey}
+        onSelect={selectTrain}
+        onStation={openStation}
       />
 
       <header className="top">
@@ -103,19 +160,31 @@ export default function App() {
             <span className={status === "live" ? "pulse" : "pulse idle"} />
             {status === "loading" && (message || "Drawing the tracks")}
             {status === "live" &&
-              `${lineTrains.length} trains · updated ${formatUpdated(updatedAt)}`}
+              `${mapTrains.length} ${mapTrains.length === 1 ? "train" : "trains"} · updated ${formatUpdated(updatedAt)}`}
             {status === "error" && (message || "TfL is not responding")}
           </p>
         </div>
         <div className="top-actions">
-          <button type="button" className="text-button" onClick={() => setMenuOpen(true)}>
-            Menu
+          <button type="button" className="text-button" onClick={() => { showAllTrains(); setMenuOpen(true); }}>
+            Plan journey
           </button>
-          <button type="button" className="text-button" onClick={() => window.dispatchEvent(new Event("railroom-home"))}>
+          <button type="button" className="text-button" onClick={() => { showAllTrains(); window.dispatchEvent(new Event("railroom-home")); }}>
             Reset view
           </button>
         </div>
       </header>
+
+      {catching && !menuOpen ? (
+        <section className="catching-banner" aria-label="Isolated journey train" aria-live="polite">
+          <div>
+            <p className="kicker">Your train · only this line shown</p>
+            <strong>{catchTrain ? `${catchTrain.lineName} to ${catchTrain.destination}` : "Live train temporarily unavailable"}</strong>
+            {catchLeg && <p>{shortStation(catchLeg.departurePoint.commonName)} → {shortStation(catchLeg.arrivalPoint.commonName)}</p>}
+            <p>{boarding ? `${formatClock(boarding.expectedArrival)} at ${shortStation(boarding.stationName)} · ${formatWait(Math.max(0, (Date.parse(boarding.expectedArrival) - now) / 1000))}` : catchTrain ? `No current prediction at ${shortStation(catching.stop.stationName)}. Check the train’s upcoming stops.` : "Waiting for this train to reappear in the live feed."}</p>
+          </div>
+          <button type="button" className="text-button" onClick={showAllTrains}>Show full map</button>
+        </section>
+      ) : null}
 
       {selected && !menuOpen ? (
         <aside className="panel" aria-live="polite">
@@ -125,7 +194,7 @@ export default function App() {
               <p className="kicker">{selected.lineName}</p>
               <h2>To {selected.destination}</h2>
             </div>
-            <button type="button" className="close" onClick={() => setSelectedId(null)} aria-label="Close">
+            <button type="button" className="close" onClick={showAllTrains} aria-label="Close">
               ×
             </button>
           </header>
@@ -152,6 +221,39 @@ export default function App() {
         </aside>
       ) : null}
 
+      {selectedStation && stationInfo && !menuOpen ? (
+        <aside className="panel station-panel" aria-label="Station information" aria-live="polite">
+          <header>
+            <div>
+              <p className="kicker">Station</p>
+              <h2>{selectedStation.name}</h2>
+            </div>
+            <button type="button" className="close" onClick={() => setSelectedStation(null)} aria-label="Close station information">×</button>
+          </header>
+          <h3 className="station-heading">Lines at this station</h3>
+          <div className="pills station-lines">
+            {stationInfo.lines.map((line) => (
+              <span className="pill" key={line.id}><span className="dot" style={{ background: line.color }} />{line.name}</span>
+            ))}
+          </div>
+          <h3 className="station-heading">Upcoming arrivals</h3>
+          <p className="station-note">From the latest live train predictions across all lines.</p>
+          {stationInfo.arrivals.length ? (
+            <ol>
+              {stationInfo.arrivals.map(({ train, stop }) => (
+                <li key={`${train.id}-${stop.naptanId}-${stop.expectedArrival}`}>
+                  <button type="button" className="station-arrival" onClick={() => openTrain(train)}>
+                    <span className="dot" style={{ background: train.color }} />
+                    <span><strong>To {train.destination}</strong><small>{train.lineName}{stop.platformName ? ` · ${stop.platformName}` : ""}</small></span>
+                    <span className="when"><span>{formatWait(Math.max(0, (Date.parse(stop.expectedArrival) - now) / 1000))}</span><time dateTime={stop.expectedArrival}>{formatClock(stop.expectedArrival)}</time></span>
+                  </button>
+                </li>
+              ))}
+            </ol>
+          ) : <p className="empty">No upcoming arrivals in the current feed. Predictions refresh automatically.</p>}
+        </aside>
+      ) : null}
+
       <footer className="legal">
         <span>Powered by TfL Open Data. Scroll or pinch to zoom. Positions follow live predictions, not GPS.</span>
         {status === "error" ? (
@@ -161,51 +263,19 @@ export default function App() {
         ) : null}
       </footer>
 
-      {menuOpen ? (
-        <MainMenu
-          query={query}
-          onQuery={setQuery}
-          hidden={hidden}
-          onToggle={toggle}
-          onToggleMode={toggleMode}
-          onAll={() => setHidden(new Set())}
-          onNone={() => setHidden(new Set(LINES.map((line) => line.id)))}
-          trains={matchedTrains.slice(0, 8)}
-          stations={stations.slice(0, 6)}
-          matchCount={needle ? matchedTrains.length : lineTrains.length}
-          onTrain={openTrain}
-          onStation={openStation}
-          onClose={() => setMenuOpen(false)}
-        />
-      ) : null}
+      <MainMenu
+        open={menuOpen}
+        routes={routes}
+        trains={trains}
+        hidden={hidden}
+        onToggle={toggle}
+        onToggleMode={toggleMode}
+        onAll={() => setHidden(new Set())}
+        onNone={() => setHidden(new Set(LINES.map((line) => line.id)))}
+        onTrain={openJourneyTrain}
+        onJourney={chooseJourney}
+        onClose={() => setMenuOpen(false)}
+      />
     </main>
   );
-}
-
-function trainMatches(train: Train, needle: string): boolean {
-  if (!needle) return true;
-  const blob = normalizeStation(
-    [train.lineName, train.lineId, train.destination, train.currentLocation, ...train.stops.map((stop) => stop.stationName)].join(
-      " ",
-    ),
-  );
-  return blob.includes(needle);
-}
-
-function stationHits(routes: LineRoute[], visible: Set<string>, needle: string): StationHit[] {
-  if (!needle) return [];
-  const seen = new Set<string>();
-  const hits: StationHit[] = [];
-  for (const route of routes) {
-    if (!visible.has(route.id)) continue;
-    for (const branch of route.branches) {
-      for (const stop of branch.stops) {
-        if (seen.has(stop.id) || !stop.norm.includes(needle)) continue;
-        seen.add(stop.id);
-        hits.push({ id: stop.id, name: shortStation(stop.name), lng: stop.lon, lat: stop.lat });
-      }
-    }
-  }
-  hits.sort((a, b) => a.name.localeCompare(b.name));
-  return hits;
 }

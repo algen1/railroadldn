@@ -4,6 +4,8 @@ import maplibreWorker from "maplibre-gl/dist/maplibre-gl-worker.mjs?url";
 import "maplibre-gl/dist/maplibre-gl.css";
 
 setWorkerUrl(maplibreWorker);
+import type { Journey } from "./journey";
+import type { StationHit } from "./MainMenu";
 import { shortStation } from "./format";
 import { HOME_VIEW } from "./lines";
 import { TrainLayer } from "./trainLayer";
@@ -22,7 +24,9 @@ type MapViewProps = {
   visible: Set<string>;
   selectedId: string | null;
   focus: MapFocus | null;
+  journey: Journey | null;
   onSelect: (id: string | null) => void;
+  onStation: (station: StationHit) => void;
 };
 
 type FeatureCollection = {
@@ -157,7 +161,7 @@ function stationData(routes: LineRoute[], visible: Set<string>): FeatureCollecti
         seen.add(stop.id);
         features.push({
           type: "Feature",
-          properties: { name: shortStation(stop.name) },
+          properties: { id: stop.id, name: shortStation(stop.name) },
           geometry: { type: "Point", coordinates: [stop.lon, stop.lat] },
         });
       }
@@ -171,6 +175,7 @@ function ensureNetwork(map: Map) {
   const before = map.getStyle()?.layers.find((layer) => layer.type === "symbol")?.id;
   map.addSource("rails", { type: "geojson", data: EMPTY });
   map.addSource("stations", { type: "geojson", data: EMPTY });
+  map.addSource("journey", { type: "geojson", data: EMPTY });
   map.addLayer(
     {
       id: "rail-casing",
@@ -239,6 +244,18 @@ function ensureNetwork(map: Map) {
   );
 }
 
+function journeyData(journey: Journey | null): FeatureCollection {
+  return { type: "FeatureCollection", features: (journey?.legs ?? []).flatMap((leg) => {
+    try {
+      const raw: unknown = JSON.parse(leg.path?.lineString ?? "[]");
+      if (!Array.isArray(raw)) return [];
+      const coordinates = raw.filter((point): point is [number, number] => Array.isArray(point) && point.length >= 2 && typeof point[0] === "number" && typeof point[1] === "number").map(([lat, lng]) => [lng, lat]);
+      if (coordinates.length < 2) return [];
+      return [{ type: "Feature" as const, properties: {}, geometry: { type: "LineString" as const, coordinates } }];
+    } catch { return []; }
+  }) };
+}
+
 function labelFont(map: Map): string[] {
   for (const layer of map.getStyle()?.layers ?? []) {
     if (layer.type !== "symbol" || !("layout" in layer) || !layer.layout) continue;
@@ -251,12 +268,14 @@ function labelFont(map: Map): string[] {
   return ["Noto Sans Regular"];
 }
 
-export default function MapView({ routes, trains, visible, selectedId, focus, onSelect }: MapViewProps) {
+export default function MapView({ routes, trains, visible, selectedId, focus, journey, onSelect, onStation }: MapViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<Map | null>(null);
   const layerRef = useRef<TrainLayer | null>(null);
   const onSelectRef = useRef(onSelect);
+  const onStationRef = useRef(onStation);
+  useEffect(() => { onStationRef.current = onStation; }, [onStation]);
   const trainsRef = useRef(trains);
   const visibleRef = useRef(visible);
   const routesRef = useRef(routes);
@@ -302,7 +321,20 @@ export default function MapView({ routes, trains, visible, selectedId, focus, on
     map.addControl(new NavigationControl({ visualizePitch: true }), "bottom-right");
     mapRef.current = map;
 
-    let down: { x: number; y: number } | null = null;
+    const stationAt = (x: number, y: number): StationHit | null => {
+      if (!map.getLayer("station-dots")) return null;
+      const features = map.queryRenderedFeatures([[x - 7, y - 7], [x + 7, y + 7]], {
+        layers: ["station-dots", "station-labels"],
+      });
+      const feature = features.find((item) => item.geometry.type === "Point");
+      if (!feature || feature.geometry.type !== "Point") return null;
+      return {
+        id: String(feature.properties.id),
+        name: String(feature.properties.name),
+        lng: feature.geometry.coordinates[0],
+        lat: feature.geometry.coordinates[1],
+      };
+    };
     map.on("load", () => {
       map.resize();
       stylize(map);
@@ -313,31 +345,28 @@ export default function MapView({ routes, trains, visible, selectedId, focus, on
       layer.setTrains(trainsRef.current.filter((train) => visibleRef.current.has(train.lineId)));
     });
 
-    map.on("mousedown", (event) => {
-      down = { x: event.point.x, y: event.point.y };
-    });
     map.on("click", (event) => {
-      if (!down) return;
-      const moved = (event.point.x - down.x) ** 2 + (event.point.y - down.y) ** 2;
-      if (moved > 16) return;
+      const station = stationAt(event.point.x, event.point.y);
+      if (station) {
+        onStationRef.current(station);
+        return;
+      }
       const hit = layer.pick(event.point.x, event.point.y);
       onSelectRef.current(hit?.id ?? null);
     });
     map.on("mousemove", (event) => {
-      const hit = layer.pick(event.point.x, event.point.y);
-      map.getCanvas().style.cursor = hit ? "pointer" : "";
+      const station = stationAt(event.point.x, event.point.y);
+      const hit = station ? null : layer.pick(event.point.x, event.point.y);
+      map.getCanvas().style.cursor = station || hit ? "pointer" : "";
       const tip = tipRef.current;
       if (!tip) return;
-      if (!hit) {
-        tip.hidden = true;
-        return;
-      }
-      tip.hidden = false;
+      tip.hidden = !station && !hit;
+      if (tip.hidden) return;
       tip.style.transform = `translate(${event.point.x + 14}px, ${event.point.y + 16}px)`;
-      if (tip.dataset.id !== hit.id) {
-        tip.dataset.id = hit.id;
-        tip.textContent = `${hit.lineName} to ${hit.destination}`;
-      }
+      tip.textContent = station ? `${station.name} · Click for station info` : `${hit!.lineName} to ${hit!.destination}`;
+    });
+    map.on("mouseout", () => {
+      if (tipRef.current) tipRef.current.hidden = true;
     });
 
     const resize = new ResizeObserver(() => map.resize());
@@ -389,6 +418,28 @@ export default function MapView({ routes, trains, visible, selectedId, focus, on
 
   useEffect(() => {
     const map = mapRef.current;
+    if (!map) return;
+    const apply = () => {
+      if (!map.getSource("journey")) return;
+      if (!map.getLayer("journey-casing")) {
+        map.addLayer({ id: "journey-casing", type: "line", source: "journey", paint: { "line-color": "#ffffff", "line-width": 10, "line-opacity": 0.95 }, layout: { "line-cap": "round", "line-join": "round" } });
+        map.addLayer({ id: "journey-route", type: "line", source: "journey", paint: { "line-color": "#175cd3", "line-width": 5 }, layout: { "line-cap": "round", "line-join": "round" } });
+      }
+      const data = journeyData(journey);
+      geojson(map, "journey")?.setData(data);
+      const points = data.features.flatMap((feature) => feature.geometry.coordinates as number[][]);
+      if (points.length) {
+        const lngs = points.map((point) => point[0]); const lats = points.map((point) => point[1]);
+        const wide = map.getCanvas().clientWidth > 800;
+        map.fitBounds([[Math.min(...lngs), Math.min(...lats)], [Math.max(...lngs), Math.max(...lats)]], { padding: wide ? { left: 480, right: 80, top: 100, bottom: 80 } : 60, maxZoom: 14, duration: 900 });
+      }
+    };
+    apply(); map.on("load", apply);
+    return () => { map.off("load", apply); };
+  }, [journey]);
+
+  useEffect(() => {
+    const map = mapRef.current;
     if (!map || !focus) return;
     map.easeTo({
       center: [focus.lng, focus.lat],
@@ -410,7 +461,7 @@ export default function MapView({ routes, trains, visible, selectedId, focus, on
         duration: 800,
       });
     }
-  }, [selectedId]);
+  }, [selectedId, trains]);
 
   return (
     <div className="map-wrap">

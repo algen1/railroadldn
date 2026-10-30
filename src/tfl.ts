@@ -182,3 +182,10 @@ export async function fetchArrivals(signal?: AbortSignal): Promise<Arrival[]> {
   );
   return batches.flat().map(toArrival).filter((item): item is Arrival => item !== null);
 }
+
+export async function planJourney(from: string, to: string, date: string, time: string, signal?: AbortSignal, mode: import("./journey").JourneyMode = "arrive"): Promise<import("./journey").Journey[]> {
+  const params = new URLSearchParams({ date: date.replaceAll("-", ""), time: time.replace(":", ""), timeIs: mode === "now" ? "Departing" : "Arriving", journeyPreference: "LeastTime", mode: "tube,overground,dlr,elizabeth-line,walking" });
+  const result = await fetchJson<{ journeys?: import("./journey").Journey[] }>(`/Journey/JourneyResults/${encodeURIComponent(from)}/to/${encodeURIComponent(to)}?${params}`, signal);
+  if (!result.journeys?.length) throw new Error("No journeys found. Try another time or date.");
+  return result.journeys;
+}

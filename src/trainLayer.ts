@@ -1,12 +1,13 @@
 import { Map as MlMap, MercatorCoordinate, type CustomLayerInterface, type CustomRenderMethodInput } from "maplibre-gl";
 import * as THREE from "three";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { LINES } from "./lines";
 import { haversine, pointAlong } from "./placeTrain";
 import type { Train } from "./types";
 
 const CAPACITY = 180;
-const PICK_RADIUS = 22;
+const PICK_RADIUS = 28;
 
 export type TrainPick = {
   id: string;
@@ -31,6 +32,7 @@ type ScreenTrain = TrainPick & { lng: number; lat: number };
 type LineBatch = {
   body: THREE.InstancedMesh;
   glass: THREE.InstancedMesh;
+  roof: THREE.InstancedMesh;
   lamp: THREE.InstancedMesh;
   disc: THREE.InstancedMesh;
 };
@@ -46,48 +48,63 @@ function merged(parts: THREE.BufferGeometry[]): THREE.BufferGeometry {
   return geometry;
 }
 
+const CARS = 3;
+const CAR_GAP = 0.035;
+const CAR_LENGTH = (1 - CAR_GAP * (CARS - 1)) / CARS;
+
+function carCenter(index: number): number {
+  return -0.5 + CAR_LENGTH / 2 + index * (CAR_LENGTH + CAR_GAP);
+}
+
 function buildBody(): THREE.BufferGeometry {
-  const cars = 4;
-  const gap = 0.028;
-  const carLength = (1 - gap * (cars - 1)) / cars;
   const parts: THREE.BufferGeometry[] = [];
-  for (let index = 0; index < cars; index += 1) {
-    const x = -0.5 + carLength / 2 + index * (carLength + gap);
-    const body = new THREE.BoxGeometry(carLength * 0.94, 0.145, 0.15);
-    body.translate(x, 0.086, 0);
+  for (let index = 0; index < CARS; index += 1) {
+    const body = new RoundedBoxGeometry(CAR_LENGTH, 0.19, 0.23, 3, 0.045);
+    body.translate(carCenter(index), 0.12, 0);
     parts.push(body);
-    const roof = new THREE.BoxGeometry(carLength * 0.58, 0.028, 0.1);
-    roof.translate(x, 0.168, 0);
+  }
+  return merged(parts);
+}
+
+function buildRoof(): THREE.BufferGeometry {
+  const parts: THREE.BufferGeometry[] = [];
+  for (let index = 0; index < CARS; index += 1) {
+    const roof = new RoundedBoxGeometry(CAR_LENGTH * 0.86, 0.045, 0.19, 2, 0.02);
+    roof.translate(carCenter(index), 0.215, 0);
     parts.push(roof);
   }
-  const nose = new THREE.BoxGeometry(0.045, 0.09, 0.12);
-  nose.translate(0.505, 0.08, 0);
-  parts.push(nose);
   return merged(parts);
 }
 
 function buildGlass(): THREE.BufferGeometry {
-  const cars = 4;
-  const gap = 0.028;
-  const carLength = (1 - gap * (cars - 1)) / cars;
   const parts: THREE.BufferGeometry[] = [];
-  for (let index = 0; index < cars; index += 1) {
-    const x = -0.5 + carLength / 2 + index * (carLength + gap);
-    const windows = new THREE.BoxGeometry(carLength * 0.68, 0.042, 0.162);
-    windows.translate(x, 0.112, 0);
-    parts.push(windows);
+  for (let index = 0; index < CARS; index += 1) {
+    for (const side of [-1, 1]) {
+      for (let window = 0; window < 3; window += 1) {
+        const pane = new THREE.BoxGeometry(0.055, 0.062, 0.008);
+        pane.translate(carCenter(index) + (window - 1) * 0.075, 0.15, side * 0.115);
+        parts.push(pane);
+      }
+    }
   }
+  const windscreen = new THREE.BoxGeometry(0.009, 0.075, 0.145);
+  windscreen.translate(0.5, 0.145, 0);
+  parts.push(windscreen);
   return merged(parts);
 }
 
 function buildLamp(): THREE.BufferGeometry {
-  const lamp = new THREE.SphereGeometry(0.016, 10, 8);
-  lamp.translate(0.53, 0.08, 0);
-  return lamp;
+  const parts: THREE.BufferGeometry[] = [];
+  for (const side of [-1, 1]) {
+    const lamp = new THREE.SphereGeometry(0.019, 8, 6);
+    lamp.translate(0.495, 0.075, side * 0.073);
+    parts.push(lamp);
+  }
+  return merged(parts);
 }
 
 function buildDisc(): THREE.BufferGeometry {
-  const disc = new THREE.CircleGeometry(1, 22);
+  const disc = new THREE.RingGeometry(0.78, 1, 40);
   disc.rotateX(Math.PI / 2);
   return disc;
 }
@@ -102,6 +119,7 @@ export class TrainLayer implements CustomLayerInterface {
   private camera: THREE.Camera | null = null;
   private scene = new THREE.Scene();
   private bodyGeo: THREE.BufferGeometry | null = null;
+  private roofGeo: THREE.BufferGeometry | null = null;
   private glassGeo: THREE.BufferGeometry | null = null;
   private lampGeo: THREE.BufferGeometry | null = null;
   private discGeo: THREE.BufferGeometry | null = null;
@@ -139,6 +157,8 @@ export class TrainLayer implements CustomLayerInterface {
     this.renderer.autoClear = false;
     const bodyGeo = buildBody();
     const glassGeo = buildGlass();
+    const roofGeo = buildRoof();
+    this.roofGeo = roofGeo;
     const lampGeo = buildLamp();
     const discGeo = buildDisc();
     this.bodyGeo = bodyGeo;
@@ -151,9 +171,10 @@ export class TrainLayer implements CustomLayerInterface {
         side: THREE.DoubleSide,
       });
       const glassMaterial = new THREE.MeshBasicMaterial({
-        color: "#d9f1fb",
+        color: "#12283b",
         side: THREE.DoubleSide,
       });
+      const roofMaterial = new THREE.MeshBasicMaterial({ color: "#ffffff", side: THREE.DoubleSide });
       const lampMaterial = new THREE.MeshBasicMaterial({
         color: "#ffe7a0",
         side: THREE.DoubleSide,
@@ -161,31 +182,37 @@ export class TrainLayer implements CustomLayerInterface {
       const discMaterial = new THREE.MeshBasicMaterial({
         color: line.color,
         side: THREE.DoubleSide,
+        transparent: true,
+        opacity: 0.65,
         depthWrite: false,
       });
       const body = new THREE.InstancedMesh(bodyGeo, bodyMaterial, CAPACITY);
       const glass = new THREE.InstancedMesh(glassGeo, glassMaterial, CAPACITY);
+      const roof = new THREE.InstancedMesh(roofGeo, roofMaterial, CAPACITY);
       const lamp = new THREE.InstancedMesh(lampGeo, lampMaterial, CAPACITY);
       const disc = new THREE.InstancedMesh(discGeo, discMaterial, CAPACITY);
-      for (const mesh of [disc, body, glass, lamp]) {
+      for (const mesh of [disc, body, glass, roof, lamp]) {
         mesh.frustumCulled = false;
         mesh.count = 0;
         this.scene.add(mesh);
       }
-      this.batches.set(line.id, { body, glass, lamp, disc });
+      this.batches.set(line.id, { body, glass, roof, lamp, disc });
     }
     this.last = performance.now();
   }
 
   onRemove(): void {
     for (const batch of this.batches.values()) {
-      this.scene.remove(batch.body, batch.glass, batch.lamp, batch.disc);
+      this.scene.remove(batch.body, batch.glass, batch.roof, batch.lamp, batch.disc);
+      (batch.roof.material as THREE.Material).dispose();
       (batch.body.material as THREE.Material).dispose();
       (batch.glass.material as THREE.Material).dispose();
       (batch.lamp.material as THREE.Material).dispose();
       (batch.disc.material as THREE.Material).dispose();
     }
     this.batches.clear();
+    this.roofGeo?.dispose();
+    this.roofGeo = null;
     this.bodyGeo?.dispose();
     this.glassGeo?.dispose();
     this.lampGeo?.dispose();
@@ -309,11 +336,11 @@ export class TrainLayer implements CustomLayerInterface {
   }
 
   private lengthFor(lat: number): number {
-    return clamp(28 * this.metersPerPixel(lat), 80, 520);
+    return clamp(26 * this.metersPerPixel(lat), 28, 900);
   }
 
   private discRadius(lat: number): number {
-    return clamp(11 * this.metersPerPixel(lat), 36, 240);
+    return clamp(15 * this.metersPerPixel(lat), 17, 520);
   }
 
   private chooseVisible(): { train: Train; motion: Motion; x: number; y: number }[] {
@@ -382,15 +409,17 @@ export class TrainLayer implements CustomLayerInterface {
       const entries = (grouped.get(lineId) ?? []).slice(0, CAPACITY);
       batch.body.count = entries.length;
       batch.glass.count = entries.length;
+      batch.roof.count = entries.length;
       batch.lamp.count = entries.length;
       batch.disc.count = entries.length;
       entries.forEach((entry, index) => {
         const selected = entry.train.id === this.selectedId;
-        const emphasis = selected ? 1.4 : 1;
+        const emphasis = selected ? 1.2 : 1;
         const length = this.lengthFor(entry.motion.lat) * emphasis;
         const matrix = this.compose(entry.motion.lng, entry.motion.lat, entry.motion.bearing, length, 6);
         batch.body.setMatrixAt(index, matrix);
         batch.glass.setMatrixAt(index, matrix);
+        batch.roof.setMatrixAt(index, matrix);
         batch.lamp.setMatrixAt(index, matrix);
         const marker = this.compose(
           entry.motion.lng,
@@ -403,6 +432,7 @@ export class TrainLayer implements CustomLayerInterface {
       });
       batch.body.instanceMatrix.needsUpdate = true;
       batch.glass.instanceMatrix.needsUpdate = true;
+      batch.roof.instanceMatrix.needsUpdate = true;
       batch.lamp.instanceMatrix.needsUpdate = true;
       batch.disc.instanceMatrix.needsUpdate = true;
     }
