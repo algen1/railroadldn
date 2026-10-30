@@ -1,3 +1,4 @@
+import { normalizeStation, shortStation } from "./format";
 import type { Train } from "./types";
 
 export type JourneyPoint = { naptanId?: string; commonName: string; lat: number; lon: number; platformName?: string };
@@ -72,24 +73,27 @@ export function eligibleJourneys(journeys: Journey[], mode: JourneyMode, now: nu
       : londonTimestamp(b.startDateTime) - londonTimestamp(a.startDateTime));
 }
 
-export function nextLiveTrainForJourney(journey: Journey, trains: Train[], now: number) {
+export function nextLiveTrainForJourney(journey: Journey, trains: Train[], now: number, searchTime = now) {
   const index = journey.legs.findIndex((leg) => leg.mode.id !== "walking");
   if (index < 0) return null;
   const leg = journey.legs[index];
   const lines = new Set(leg.routeOptions?.map((option) => option.lineIdentifier?.id));
   const walkingMinutes = journey.legs.slice(0, index).reduce((sum, leg) => sum + leg.duration, 0);
-  const ready = now + walkingMinutes * 60000;
-  const hasConnection = journey.legs.slice(index + 1).some((leg) => leg.mode.id !== "walking");
+  const ready = Math.max(now, searchTime + walkingMinutes * 60000);
+  const nextIndex = journey.legs.findIndex((item, legIndex) => legIndex > index && item.mode.id !== "walking");
+  const transferMinutes = nextIndex < 0 ? 0 : journey.legs.slice(index + 1, nextIndex).reduce((sum, leg) => sum + leg.duration, 0);
+  const transferDeadline = nextIndex < 0 ? Infinity : londonTimestamp(journey.legs[nextIndex].departureTime) - transferMinutes * 60000;
+  const matchesPoint = (stop: Train["stops"][number], point: JourneyPoint) => stop.naptanId === point.naptanId || Boolean(stop.stationName && point.commonName && normalizeStation(shortStation(stop.stationName)) === normalizeStation(shortStation(point.commonName)));
   const matches = trains.flatMap((train) => {
     if (!lines.has(train.lineId)) return [];
-    const stop = train.stops.find((stop) => stop.naptanId === leg.departurePoint.naptanId);
-    const end = train.stops.find((stop) => stop.naptanId === leg.arrivalPoint.naptanId);
+    const stop = train.stops.find((stop) => matchesPoint(stop, leg.departurePoint));
+    const end = train.stops.find((stop) => matchesPoint(stop, leg.arrivalPoint));
     if (!stop || !end) return [];
     const departure = Date.parse(stop.expectedArrival);
     const arrival = Date.parse(end.expectedArrival);
     if (!Number.isFinite(departure) || !Number.isFinite(arrival) || departure < ready || departure > now + 30 * 60000 || arrival <= departure) return [];
-    // Preserve the transfer time allowed by TfL when another train is needed.
-    if (hasConnection && arrival > londonTimestamp(leg.arrivalTime)) return [];
+    // Allow live timing variation when there is still time to make the connection.
+    if (arrival >= transferDeadline) return [];
     return [{ train, stop, departure, arrival }];
   });
   matches.sort((a, b) => a.departure - b.departure || a.arrival - b.arrival);

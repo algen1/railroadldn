@@ -249,6 +249,10 @@ export class TrainLayer implements CustomLayerInterface {
     return best;
   }
 
+  screenPosition(id: string): { x: number; y: number } | undefined {
+    return this.screen.find((train) => train.id === id);
+  }
+
   sampleNearCenter(): TrainPick | null {
     const map = this.map;
     if (!map || this.screen.length === 0) return null;

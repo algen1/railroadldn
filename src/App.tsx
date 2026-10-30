@@ -4,7 +4,7 @@ import { formatClock, formatUpdated, formatWait, normalizeStation, shortStation 
 import MainMenu, { type StationHit } from "./MainMenu";
 import MapView, { type MapFocus } from "./MapView";
 import { useNetwork } from "./useNetwork";
-import type { Journey } from "./journey";
+import { nextLiveTrainForJourney, type Journey } from "./journey";
 import type { Train, UpcomingStop } from "./types";
 
 export default function App() {
@@ -16,41 +16,52 @@ export default function App() {
   }, []);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [catching, setCatching] = useState<{ trainId: string; lineId: string; stop: UpcomingStop } | null>(null);
+  const [catching, setCatching] = useState<{ trainId: string; lineId: string; stop: UpcomingStop; lastTrain: Train } | null>(null);
   const [selectedStation, setSelectedStation] = useState<StationHit | null>(null);
+  const [journeyOnly, setJourneyOnly] = useState(false);
   const [journey, setJourney] = useState<Journey | null>(null);
   const [menuOpen, setMenuOpen] = useState(true);
   const [focus, setFocus] = useState<MapFocus | null>(null);
 
   const visible = useMemo(() => {
-    if (catching) return new Set([catching.lineId]);
+    if (catching || journeyOnly) return new Set<string>();
     const ids = new Set<string>();
     for (const line of LINES) {
       if (!hidden.has(line.id)) ids.add(line.id);
     }
     return ids;
-  }, [hidden, catching]);
+  }, [hidden, catching, journeyOnly]);
 
   const lineTrains = useMemo(() => trains.filter((train) => visible.has(train.lineId)), [trains, visible]);
-  const mapTrains = useMemo(() => catching ? trains.filter((train) => train.id === catching.trainId) : lineTrains, [catching, trains, lineTrains]);
+  const mapTrains = useMemo(() => catching ? [trains.find((train) => train.id === catching.trainId) ?? catching.lastTrain] : journeyOnly ? [] : lineTrains, [catching, journeyOnly, trains, lineTrains]);
   const selected = mapTrains.find((train) => train.id === (catching?.trainId ?? selectedId)) ?? null;
-  const catchTrain = catching ? trains.find((train) => train.id === catching.trainId) : null;
+  const liveCatchTrain = catching ? trains.find((train) => train.id === catching.trainId) : null;
+  const catchTrain = liveCatchTrain ?? catching?.lastTrain;
+  const trainStale = Boolean(catching && !liveCatchTrain);
+
+  useEffect(() => {
+    if (!liveCatchTrain) return;
+    setCatching(current => current && current.trainId === liveCatchTrain.id && current.lastTrain !== liveCatchTrain ? { ...current, lastTrain: liveCatchTrain } : current);
+  }, [liveCatchTrain]);
   const catchLeg = catching ? journey?.legs.find((leg) => leg.departurePoint.naptanId === catching.stop.naptanId && leg.routeOptions?.some((option) => option.lineIdentifier?.id === catching.lineId)) : null;
   const boarding = catching ? catchTrain?.stops.find((stop) => stop.naptanId === catching.stop.naptanId) : null;
 
   function showAllTrains() {
+    setJourneyOnly(false);
     setCatching(null);
     setSelectedId(null);
   }
 
   function openJourneyTrain(train: Train, stop: UpcomingStop) {
     selectTrain(train.id);
-    setCatching({ trainId: train.id, lineId: train.lineId, stop });
+    setCatching({ trainId: train.id, lineId: train.lineId, stop, lastTrain: train });
     setFocus({ lng: train.lng, lat: train.lat, zoom: 14.2, token: Date.now() });
   }
 
-  function chooseJourney(value: Journey | null) {
-    showAllTrains();
+  function chooseJourney(value: Journey | null, isolate = false) {
+    setCatching(null);
+    setSelectedId(null);
+    setJourneyOnly(Boolean(value && isolate));
     setJourney(value);
   }
 
@@ -80,8 +91,14 @@ export default function App() {
   function selectTrain(id: string | null) {
     setSelectedStation(null);
     setSelectedId(id);
-    if (!id) setCatching(null);
     setMenuOpen(false);
+    if (!id) return;
+    const train = trains.find(train => train.id === id) ?? (catching?.trainId === id ? catching.lastTrain : null);
+    if (!train) return;
+    // Only a verified boarding service can be labelled as the train to catch.
+    const match = journey ? nextLiveTrainForJourney(journey, trains, Date.now()) : null;
+    if (!catching && match?.train.id === id) setCatching({ trainId: train.id, lineId: train.lineId, stop: match.stop, lastTrain: train });
+    setFocus({ lng: train.lng, lat: train.lat, zoom: 14.2, token: Date.now() });
   }
 
   useEffect(() => {
@@ -124,6 +141,7 @@ export default function App() {
   }
 
   function openTrain(train: Train) {
+    if (catching) { selectTrain(catching.trainId); return; }
     setCatching(null);
     setHidden((current) => { const next = new Set(current); next.delete(train.lineId); return next; });
     selectTrain(train.id);
@@ -132,7 +150,7 @@ export default function App() {
   }
 
   function openStation(station: StationHit) {
-    setCatching(null);
+    // Inspecting a station must not leave the isolated journey view.
     setSelectedId(null);
     setSelectedStation(station);
     setFocus({ lng: station.lng, lat: station.lat, zoom: 14, token: Date.now() });
@@ -146,8 +164,11 @@ export default function App() {
         trains={mapTrains}
         visible={visible}
         selectedId={selected?.id ?? null}
+        catchTrainId={catching?.trainId ?? null}
+        catchLeg={catchLeg ?? null}
+        trainStale={trainStale}
         focus={focus}
-        journey={catching ? null : journey}
+        journey={journey}
         onSelect={selectTrain}
         onStation={openStation}
       />
@@ -177,16 +198,17 @@ export default function App() {
       {catching && !menuOpen ? (
         <section className="catching-banner" aria-label="Isolated journey train" aria-live="polite">
           <div>
-            <p className="kicker">Your train · only this line shown</p>
+            <p className="kicker">Your next train · all other trains and lines hidden</p>
             <strong>{catchTrain ? `${catchTrain.lineName} to ${catchTrain.destination}` : "Live train temporarily unavailable"}</strong>
             {catchLeg && <p>{shortStation(catchLeg.departurePoint.commonName)} → {shortStation(catchLeg.arrivalPoint.commonName)}</p>}
-            <p>{boarding ? `${formatClock(boarding.expectedArrival)} at ${shortStation(boarding.stationName)} · ${formatWait(Math.max(0, (Date.parse(boarding.expectedArrival) - now) / 1000))}` : catchTrain ? `No current prediction at ${shortStation(catching.stop.stationName)}. Check the train’s upcoming stops.` : "Waiting for this train to reappear in the live feed."}</p>
+            {trainStale && <p role="status">Live update missing · showing this train’s last reported position. Waiting for TfL to report it again.</p>}
+            <p>{!trainStale && boarding ? `${formatClock(boarding.expectedArrival)} at ${shortStation(boarding.stationName)} · ${formatWait(Math.max(0, (Date.parse(boarding.expectedArrival) - now) / 1000))}` : catchTrain ? `No current prediction at ${shortStation(catching.stop.stationName)}. Check the train’s upcoming stops.` : "Waiting for this train to reappear in the live feed."}</p>
           </div>
           <button type="button" className="text-button" onClick={showAllTrains}>Show full map</button>
         </section>
       ) : null}
 
-      {selected && !menuOpen ? (
+      {selected && !selectedStation && !menuOpen ? (
         <aside className="panel" aria-live="polite">
           <header>
             <span className="swatch" style={{ background: selected.color }} />
@@ -198,7 +220,7 @@ export default function App() {
               ×
             </button>
           </header>
-          <p className="where">{selected.currentLocation || "Location is updating"}</p>
+          <p className="where">{trainStale ? "Last reported: " : ""}{selected.currentLocation || "Location is updating"}</p>
           <h3>Upcoming arrivals</h3>
           {selected.stops.length === 0 ? (
             <p className="empty">This train has not reported any upcoming stops.</p>
@@ -211,7 +233,7 @@ export default function App() {
                     {stop.platformName ? <small>{stop.platformName}</small> : null}
                   </div>
                   <div className="when">
-                    <span>{formatWait(stop.timeToStation)}</span>
+                    <span>{formatWait(Math.max(0, (Date.parse(stop.expectedArrival) - now) / 1000))}</span>
                     <time dateTime={stop.expectedArrival}>{formatClock(stop.expectedArrival)}</time>
                   </div>
                 </li>
