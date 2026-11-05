@@ -16,6 +16,14 @@ The journey planner defaults to **Leave now**. A search automatically centres on
 
 The isolated map shows the journey route in each line’s TfL colour, boarding and destination labels, and change stations naming the next line. Walking connections are dashed. The glass-style interface uses translucent panels, rounded controls and blur, with reduced-transparency and reduced-motion fallbacks.
 
+## Screenshots
+
+![The full network map with the journey planner open](docs/screenshots/network-map.webp)
+
+![Live arrivals for South Harrow station](docs/screenshots/station-arrivals.webp)
+
+![Leave now isolating the next Metropolitan line train from Baker Street to Aldgate](docs/screenshots/catch-this-train.webp)
+
 See [CHANGELOG.md](CHANGELOG.md) for the latest changes.
 
 ## Checks
